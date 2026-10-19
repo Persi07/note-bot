@@ -86,6 +86,19 @@ def init_db():
             )
         """)
         
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS schedule (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                weekday INTEGER,
+                time_start TEXT,
+                title TEXT,
+                event_type TEXT,
+                location TEXT,
+                category_id INTEGER
+            )
+        """)
+        
         conn.commit()
 
 def migrate_db():
@@ -137,6 +150,19 @@ class LinkStates(StatesGroup):
     editing_title = State()
     editing_url = State()
 
+class ScheduleStates(StatesGroup):
+    adding_title = State()
+    adding_weekday = State()
+    adding_time = State()
+    adding_event_type = State()
+    adding_location = State()
+    adding_category = State()
+    editing_title = State()
+    editing_time = State()
+    editing_event_type = State()
+    editing_location = State()
+    editing_category = State()
+
 # Helper functions
 def check_access(user_id: int) -> bool:
     if not allowed_ids:
@@ -171,6 +197,10 @@ def parse_date(date_str: str) -> str | None:
         return dt.isoformat()
     except:
         return None
+
+def get_weekday_name(weekday: int) -> str:
+    names = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+    return names[weekday] if 0 <= weekday <= 6 else ""
 
 # Keyboards
 def main_menu_kb():
@@ -296,6 +326,88 @@ def deadlines_kb():
     kb.adjust(1)
     return kb.as_markup()
 
+def schedule_main_kb(counts: dict):
+    kb = InlineKeyboardBuilder()
+    days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    for i, day in enumerate(days):
+        count = counts.get(i, 0)
+        kb.button(text=f"{day} ({count})", callback_data=f"schedule_day_{i}")
+    kb.adjust(2, 2, 2, 1)
+    kb.button(text="📆 Вся неделя", callback_data="schedule_week")
+    kb.button(text="➕ Добавить событие", callback_data="schedule_add")
+    kb.button(text="⬅️ Назад", callback_data="main_menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+def schedule_day_kb(events: list, weekday: int):
+    kb = InlineKeyboardBuilder()
+    for event in events:
+        kb.button(text=f"{event[3]} {event[4]}", callback_data=f"schedule_event_{event[0]}")
+    kb.adjust(1)
+    kb.button(text="➕ Добавить событие", callback_data="schedule_add")
+    kb.button(text="⬅️ Назад", callback_data="schedule_main")
+    kb.adjust(1)
+    return kb.as_markup()
+
+def schedule_event_kb(event_id: int):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✏️ Изменить", callback_data=f"schedule_edit_menu_{event_id}")
+    kb.button(text="🗑 Удалить", callback_data=f"schedule_del_confirm_{event_id}")
+    kb.button(text="⬅️ Назад", callback_data=f"schedule_day_{0}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+def schedule_edit_menu_kb(event_id: int):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Изменить название", callback_data=f"schedule_edit_title_{event_id}")
+    kb.button(text="Изменить время", callback_data=f"schedule_edit_time_{event_id}")
+    kb.button(text="Изменить тип", callback_data=f"schedule_edit_type_{event_id}")
+    kb.button(text="Изменить место", callback_data=f"schedule_edit_location_{event_id}")
+    kb.button(text="Изменить категорию", callback_data=f"schedule_edit_category_{event_id}")
+    kb.button(text="⬅️ Назад", callback_data=f"schedule_event_{event_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+def schedule_weekday_select_kb():
+    kb = InlineKeyboardBuilder()
+    days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    for i, day in enumerate(days):
+        kb.button(text=day, callback_data=f"schedule_add_wd_{i}")
+    kb.adjust(4, 3)
+    kb.button(text="⬅️ Отмена", callback_data="schedule_cancel")
+    kb.adjust(1)
+    return kb.as_markup()
+
+def schedule_event_type_kb():
+    kb = InlineKeyboardBuilder()
+    types = ["занятие", "встреча", "работа", "личное"]
+    for t in types:
+        kb.button(text=t, callback_data=f"schedule_add_type_{t}")
+    kb.adjust(2)
+    kb.button(text="⬅️ Отмена", callback_data="schedule_cancel")
+    kb.adjust(1)
+    return kb.as_markup()
+
+def schedule_category_select_kb(categories: list):
+    kb = InlineKeyboardBuilder()
+    for cat in categories:
+        kb.button(text=cat[2], callback_data=f"schedule_add_cat_{cat[0]}")
+    kb.button(text="Без категории", callback_data="schedule_add_cat_none")
+    kb.adjust(1)
+    kb.button(text="⬅️ Отмена", callback_data="schedule_cancel")
+    kb.adjust(1)
+    return kb.as_markup()
+
+def schedule_edit_category_select_kb(categories: list, event_id: int):
+    kb = InlineKeyboardBuilder()
+    for cat in categories:
+        kb.button(text=cat[2], callback_data=f"schedule_edit_cat_{event_id}_{cat[0]}")
+    kb.button(text="Без категории", callback_data=f"schedule_edit_cat_{event_id}_none")
+    kb.adjust(1)
+    kb.button(text="⬅️ Назад", callback_data=f"schedule_edit_menu_{event_id}")
+    kb.adjust(1)
+    return kb.as_markup()
+
 # Handlers
 
 @dp.message(CommandStart())
@@ -321,11 +433,25 @@ async def cmd_cancel(message: Message, state: FSMContext):
     await message.answer("Отменено.", reply_markup=main_menu_kb())
 
 @dp.message(F.text == "📅 Расписание")
-async def schedule_stub(message: Message):
+async def show_schedule(message: Message, state: FSMContext):
     if not check_access(message.from_user.id):
         await message.answer("У тебя нет доступа к этому боту.")
         return
-    await message.answer("Раздел находится в разработке.", reply_markup=main_menu_kb())
+    
+    await state.clear()
+    user_db_id = get_user_id_by_telegram_id(message.from_user.id)
+    if not user_db_id:
+        save_user(message.from_user.id)
+        user_db_id = get_user_id_by_telegram_id(message.from_user.id)
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT weekday, COUNT(*) FROM schedule WHERE user_id = ? GROUP BY weekday", (user_db_id,))
+        rows = cur.fetchall()
+    
+    counts = {row[0]: row[1] for row in rows}
+    
+    await message.answer("Расписание:", reply_markup=schedule_main_kb(counts))
 
 @dp.message(F.text == "❓ Помощь")
 async def help_cmd(message: Message):
@@ -335,8 +461,8 @@ async def help_cmd(message: Message):
     text = """Это бот для хранения заметок, задач, дедлайнов и ссылок.
 Разделы:
 📂 Мои категории — управление категориями, заметками, задачами и ссылками.
-⏰ Дедлайны — список ближайших задач.
-📅 Расписание — находится в разработке."""
+📅 Расписание — управление событиями по дням недели.
+⏰ Дедлайны — список ближайших задач."""
     await message.answer(text, reply_markup=main_menu_kb())
 
 @dp.message(F.text == "📂 Мои категории")
@@ -896,6 +1022,153 @@ async def handle_edit_link_url(message: Message, state: FSMContext):
         await message.answer(f"Название: {link[2]}\nURL: {link[3]}", reply_markup=link_card_kb(link_id, cat_id))
     else:
         await message.answer("Запись не найдена.")
+
+# Schedule FSM handlers
+@dp.message(ScheduleStates.adding_title)
+async def handle_schedule_add_title(message: Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        await message.answer("У тебя нет доступа к этому боту.")
+        return
+    
+    logger.info(f"Schedule add: received title from user {message.from_user.id}")
+    title = message.text.strip()
+    if not title:
+        await message.answer("Название не может быть пустым. Попробуйте снова:")
+        return
+    
+    await state.update_data(title=title)
+    await state.set_state(ScheduleStates.adding_weekday)
+    await message.answer("Выберите день недели:", reply_markup=schedule_weekday_select_kb())
+
+@dp.message(ScheduleStates.adding_time)
+async def handle_schedule_add_time(message: Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        await message.answer("У тебя нет доступа к этому боту.")
+        return
+    
+    logger.info(f"Schedule add: received time from user {message.from_user.id}")
+    time_str = message.text.strip()
+    
+    try:
+        datetime.strptime(time_str, "%H:%M")
+    except ValueError:
+        await message.answer("Неверный формат времени. Введите в формате ЧЧ:ММ (например, 09:30):")
+        return
+    
+    await state.update_data(time_start=time_str)
+    await state.set_state(ScheduleStates.adding_event_type)
+    await message.answer("Выберите тип события:", reply_markup=schedule_event_type_kb())
+
+@dp.message(ScheduleStates.adding_location)
+async def handle_schedule_add_location(message: Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        await message.answer("У тебя нет доступа к этому боту.")
+        return
+    
+    logger.info(f"Schedule add: received location from user {message.from_user.id}")
+    location = message.text.strip()
+    if location == "-":
+        location = ""
+    
+    await state.update_data(location=location)
+    await state.set_state(ScheduleStates.adding_category)
+    
+    user_db_id = get_user_id_by_telegram_id(message.from_user.id)
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM categories WHERE user_id = ?", (user_db_id,))
+        categories = cur.fetchall()
+    
+    await message.answer("Выберите категорию:", reply_markup=schedule_category_select_kb(categories))
+
+# Schedule edit FSM handlers
+@dp.message(ScheduleStates.editing_title)
+async def handle_schedule_edit_title(message: Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        await message.answer("У тебя нет доступа к этому боту.")
+        return
+    
+    logger.info(f"Schedule edit: updating title from user {message.from_user.id}")
+    data = await state.get_data()
+    event_id = data.get("event_id")
+    new_title = message.text.strip()
+    
+    if not new_title:
+        await message.answer("Название не может быть пустым. Попробуйте снова:")
+        return
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("UPDATE schedule SET title = ? WHERE id = ?", (new_title, event_id))
+            conn.commit()
+        except Exception as e:
+            logging.exception("Database error while updating schedule title")
+            await message.answer("Произошла ошибка при работе с базой данных.")
+            return
+    
+    await state.clear()
+    await message.answer("Название обновлено!")
+    await show_schedule_event_card(message, event_id)
+
+@dp.message(ScheduleStates.editing_time)
+async def handle_schedule_edit_time(message: Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        await message.answer("У тебя нет доступа к этому боту.")
+        return
+    
+    logger.info(f"Schedule edit: updating time from user {message.from_user.id}")
+    data = await state.get_data()
+    event_id = data.get("event_id")
+    time_str = message.text.strip()
+    
+    try:
+        datetime.strptime(time_str, "%H:%M")
+    except ValueError:
+        await message.answer("Неверный формат времени. Введите в формате ЧЧ:ММ (например, 09:30):")
+        return
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("UPDATE schedule SET time_start = ? WHERE id = ?", (time_str, event_id))
+            conn.commit()
+        except Exception as e:
+            logging.exception("Database error while updating schedule time")
+            await message.answer("Произошла ошибка при работе с базой данных.")
+            return
+    
+    await state.clear()
+    await message.answer("Время обновлено!")
+    await show_schedule_event_card(message, event_id)
+
+@dp.message(ScheduleStates.editing_location)
+async def handle_schedule_edit_location(message: Message, state: FSMContext):
+    if not check_access(message.from_user.id):
+        await message.answer("У тебя нет доступа к этому боту.")
+        return
+    
+    logger.info(f"Schedule edit: updating location from user {message.from_user.id}")
+    data = await state.get_data()
+    event_id = data.get("event_id")
+    location = message.text.strip()
+    
+    if location == "-":
+        location = ""
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("UPDATE schedule SET location = ? WHERE id = ?", (location, event_id))
+            conn.commit()
+        except Exception as e:
+            logging.exception("Database error while updating schedule location")
+            await message.answer("Произошла ошибка при работе с базой данных.")
+            return
+    
+    await state.clear()
+    await message.answer("Место обновлено!")
+    await show_schedule_event_card(message, event_id)
 
 # ============================================================================
 # CATCH-ALL HANDLER - MUST BE AFTER ALL STATE HANDLERS
@@ -1500,6 +1773,350 @@ async def cb_delete_overdue(callback: CallbackQuery):
         
     await callback.message.edit_text(msg, reply_markup=deadlines_kb())
     await callback.answer()
+
+# Schedule callbacks
+@dp.callback_query(F.data == "schedule_main")
+async def cb_schedule_main(callback: CallbackQuery):
+    logger.info(f"User {callback.from_user.id} opened schedule main")
+    user_db_id = get_user_id_by_telegram_id(callback.from_user.id)
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT weekday, COUNT(*) FROM schedule WHERE user_id = ? GROUP BY weekday", (user_db_id,))
+        rows = cur.fetchall()
+    
+    counts = {row[0]: row[1] for row in rows}
+    
+    await callback.message.edit_text("Расписание:", reply_markup=schedule_main_kb(counts))
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("schedule_day_"))
+async def cb_schedule_day(callback: CallbackQuery):
+    weekday = int(callback.data.split("_")[2])
+    logger.info(f"User {callback.from_user.id} opened schedule day {weekday}")
+    user_db_id = get_user_id_by_telegram_id(callback.from_user.id)
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM schedule WHERE user_id = ? AND weekday = ? ORDER BY time_start", (user_db_id, weekday))
+        events = cur.fetchall()
+    
+    day_name = get_weekday_name(weekday)
+    
+    if not events:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="➕ Добавить событие", callback_data="schedule_add")
+        kb.button(text="⬅️ Назад", callback_data="schedule_main")
+        kb.adjust(1)
+        await callback.message.edit_text(f"{day_name}\n\nНет событий в этот день.", reply_markup=kb.as_markup())
+    else:
+        await callback.message.edit_text(f"{day_name}", reply_markup=schedule_day_kb(events, weekday))
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("schedule_event_"))
+async def cb_schedule_event(callback: CallbackQuery):
+    event_id = int(callback.data.split("_")[2])
+    logger.info(f"User {callback.from_user.id} opened schedule event {event_id}")
+    await show_schedule_event_card_callback(callback, event_id)
+    await callback.answer()
+
+@dp.callback_query(F.data == "schedule_add")
+async def cb_schedule_add(callback: CallbackQuery, state: FSMContext):
+    logger.info(f"User {callback.from_user.id} started adding schedule event")
+    await state.set_state(ScheduleStates.adding_title)
+    await callback.message.answer("Введите название события:")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("schedule_add_wd_"))
+async def cb_schedule_add_weekday(callback: CallbackQuery, state: FSMContext):
+    weekday = int(callback.data.split("_")[3])
+    logger.info(f"User {callback.from_user.id} selected weekday {weekday}")
+    await state.update_data(weekday=weekday)
+    await state.set_state(ScheduleStates.adding_time)
+    await callback.message.answer("Введите время в формате ЧЧ:ММ (например, 09:30):")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("schedule_add_type_"))
+async def cb_schedule_add_type(callback: CallbackQuery, state: FSMContext):
+    event_type = callback.data.split("_")[3]
+    logger.info(f"User {callback.from_user.id} selected event type {event_type}")
+    await state.update_data(event_type=event_type)
+    await state.set_state(ScheduleStates.adding_location)
+    await callback.message.answer("Введите место проведения (или '-' если не указано):")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("schedule_add_cat_"))
+async def cb_schedule_add_category(callback: CallbackQuery, state: FSMContext):
+    logger.info(f"User {callback.from_user.id} selected category for schedule event")
+    parts = callback.data.split("_")
+    cat_part = parts[3]
+    
+    if cat_part == "none":
+        category_id = None
+    else:
+        category_id = int(cat_part)
+    
+    data = await state.get_data()
+    user_db_id = get_user_id_by_telegram_id(callback.from_user.id)
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "INSERT INTO schedule (user_id, weekday, time_start, title, event_type, location, category_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_db_id, data["weekday"], data["time_start"], data["title"], data["event_type"], data["location"], category_id)
+            )
+            conn.commit()
+            event_id = cur.lastrowid
+        except Exception as e:
+            logging.exception("Database error while creating schedule event")
+            await callback.message.answer("Произошла ошибка при работе с базой данных.")
+            await callback.answer()
+            return
+    
+    await state.clear()
+    await callback.message.answer("Событие добавлено!")
+    await show_schedule_event_card_callback(callback, event_id)
+    await callback.answer()
+
+@dp.callback_query(F.data == "schedule_cancel")
+async def cb_schedule_cancel(callback: CallbackQuery, state: FSMContext):
+    logger.info(f"User {callback.from_user.id} cancelled schedule event creation")
+    await state.clear()
+    user_db_id = get_user_id_by_telegram_id(callback.from_user.id)
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT weekday, COUNT(*) FROM schedule WHERE user_id = ? GROUP BY weekday", (user_db_id,))
+        rows = cur.fetchall()
+    
+    counts = {row[0]: row[1] for row in rows}
+    
+    await callback.message.edit_text("Расписание:", reply_markup=schedule_main_kb(counts))
+    await callback.answer()
+
+@dp.callback_query(F.data == "schedule_week")
+async def cb_schedule_week(callback: CallbackQuery):
+    logger.info(f"User {callback.from_user.id} opened schedule week view")
+    user_db_id = get_user_id_by_telegram_id(callback.from_user.id)
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM schedule WHERE user_id = ? ORDER BY weekday, time_start", (user_db_id,))
+        events = cur.fetchall()
+    
+    if not events:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="⬅️ Назад", callback_data="schedule_main")
+        kb.adjust(1)
+        await callback.message.edit_text("На неделе нет событий.", reply_markup=kb.as_markup())
+        await callback.answer()
+        return
+    
+    grouped = {}
+    for event in events:
+        weekday = event[2]
+        if weekday not in grouped:
+            grouped[weekday] = []
+        grouped[weekday].append(event)
+    
+    lines = []
+    for weekday in range(7):
+        if weekday in grouped:
+            lines.append(f"{get_weekday_name(weekday)}:")
+            for event in grouped[weekday]:
+                lines.append(f"{event[3]} — {event[4]} ({event[5]})")
+            lines.append("")
+    
+    text = "\n".join(lines).strip()
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="schedule_main")
+    kb.adjust(1)
+    
+    await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("schedule_edit_menu_"))
+async def cb_schedule_edit_menu(callback: CallbackQuery):
+    event_id = int(callback.data.split("_")[3])
+    await callback.message.edit_text("Что изменить?", reply_markup=schedule_edit_menu_kb(event_id))
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("schedule_edit_title_"))
+async def cb_schedule_edit_title(callback: CallbackQuery, state: FSMContext):
+    event_id = int(callback.data.split("_")[3])
+    await state.set_state(ScheduleStates.editing_title)
+    await state.update_data(event_id=event_id)
+    await callback.message.answer("Введите новое название:")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("schedule_edit_time_"))
+async def cb_schedule_edit_time(callback: CallbackQuery, state: FSMContext):
+    event_id = int(callback.data.split("_")[3])
+    await state.set_state(ScheduleStates.editing_time)
+    await state.update_data(event_id=event_id)
+    await callback.message.answer("Введите новое время в формате ЧЧ:ММ:")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("schedule_edit_type_"))
+async def cb_schedule_edit_type(callback: CallbackQuery, state: FSMContext):
+    event_id = int(callback.data.split("_")[3])
+    await state.set_state(ScheduleStates.editing_event_type)
+    await state.update_data(event_id=event_id)
+    await callback.message.answer("Выберите новый тип:", reply_markup=schedule_event_type_kb())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("schedule_edit_location_"))
+async def cb_schedule_edit_location(callback: CallbackQuery, state: FSMContext):
+    event_id = int(callback.data.split("_")[3])
+    await state.set_state(ScheduleStates.editing_location)
+    await state.update_data(event_id=event_id)
+    await callback.message.answer("Введите новое место (или '-' если не указано):")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("schedule_edit_category_"))
+async def cb_schedule_edit_category(callback: CallbackQuery):
+    event_id = int(callback.data.split("_")[3])
+    user_db_id = get_user_id_by_telegram_id(callback.from_user.id)
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM categories WHERE user_id = ?", (user_db_id,))
+        categories = cur.fetchall()
+    
+    await callback.message.edit_text("Выберите категорию:", reply_markup=schedule_edit_category_select_kb(categories, event_id))
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("schedule_edit_cat_"))
+async def cb_schedule_edit_category_select(callback: CallbackQuery):
+    logger.info(f"User {callback.from_user.id} updating schedule event category")
+    parts = callback.data.split("_")
+    event_id = int(parts[3])
+    cat_part = parts[4]
+    
+    if cat_part == "none":
+        category_id = None
+    else:
+        category_id = int(cat_part)
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("UPDATE schedule SET category_id = ? WHERE id = ?", (category_id, event_id))
+            conn.commit()
+        except Exception as e:
+            logging.exception("Database error while updating schedule category")
+            await callback.answer("Произошла ошибка при работе с базой данных.", show_alert=True)
+            return
+    
+    await callback.message.answer("Категория обновлена!")
+    await show_schedule_event_card_callback(callback, event_id)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("schedule_del_confirm_"))
+async def cb_schedule_del_confirm(callback: CallbackQuery):
+    event_id = int(callback.data.split("_")[3])
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Да, удалить", callback_data=f"schedule_del_yes_{event_id}")
+    kb.button(text="Нет, назад", callback_data=f"schedule_event_{event_id}")
+    kb.adjust(2)
+    await callback.message.edit_text("Вы уверены, что хотите удалить это событие?", reply_markup=kb.as_markup())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("schedule_del_yes_"))
+async def cb_schedule_del_yes(callback: CallbackQuery):
+    logger.info(f"User {callback.from_user.id} deleting schedule event")
+    event_id = int(callback.data.split("_")[3])
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT weekday FROM schedule WHERE id = ?", (event_id,))
+            row = cur.fetchone()
+            if not row:
+                await callback.answer("Запись не найдена.", show_alert=True)
+                return
+            weekday = row[0]
+            
+            cur.execute("DELETE FROM schedule WHERE id = ?", (event_id,))
+            conn.commit()
+        except Exception as e:
+            logging.exception("Database error while deleting schedule event")
+            await callback.answer("Произошла ошибка при работе с базой данных.", show_alert=True)
+            return
+    
+    user_db_id = get_user_id_by_telegram_id(callback.from_user.id)
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM schedule WHERE user_id = ? AND weekday = ? ORDER BY time_start", (user_db_id, weekday))
+        events = cur.fetchall()
+    
+    day_name = get_weekday_name(weekday)
+    
+    if not events:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="➕ Добавить событие", callback_data="schedule_add")
+        kb.button(text="⬅️ Назад", callback_data="schedule_main")
+        kb.adjust(1)
+        await callback.message.edit_text(f"{day_name}\n\nНет событий в этот день.", reply_markup=kb.as_markup())
+    else:
+        await callback.message.edit_text(f"{day_name}", reply_markup=schedule_day_kb(events, weekday))
+    await callback.answer()
+
+# Helper function to show schedule event card
+async def show_schedule_event_card(message: Message, event_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM schedule WHERE id = ?", (event_id,))
+        event = cur.fetchone()
+    
+    if not event:
+        await message.answer("Запись не найдена.")
+        return
+    
+    weekday_name = get_weekday_name(event[2])
+    location = event[6] if event[6] else "не указано"
+    
+    category_name = "Без категории"
+    if event[7]:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM categories WHERE id = ?", (event[7],))
+            cat_row = cur.fetchone()
+            if cat_row:
+                category_name = cat_row[0]
+    
+    text = f"Название: {event[4]}\nВремя: {event[3]}\nДень: {weekday_name}\nТип: {event[5]}\nМесто: {location}\nКатегория: {category_name}"
+    
+    await message.answer(text, reply_markup=schedule_event_kb(event_id))
+
+async def show_schedule_event_card_callback(callback: CallbackQuery, event_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM schedule WHERE id = ?", (event_id,))
+        event = cur.fetchone()
+    
+    if not event:
+        await callback.message.answer("Запись не найдена.")
+        return
+    
+    weekday_name = get_weekday_name(event[2])
+    location = event[6] if event[6] else "не указано"
+    
+    category_name = "Без категории"
+    if event[7]:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM categories WHERE id = ?", (event[7],))
+            cat_row = cur.fetchone()
+            if cat_row:
+                category_name = cat_row[0]
+    
+    text = f"Название: {event[4]}\nВремя: {event[3]}\nДень: {weekday_name}\nТип: {event[5]}\nМесто: {location}\nКатегория: {category_name}"
+    
+    await callback.message.edit_text(text, reply_markup=schedule_event_kb(event_id))
 
 async def main():
     print("Бот запущен...")
